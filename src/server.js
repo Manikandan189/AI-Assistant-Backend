@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import { config } from './config/config.js';
-import { initDatabase } from './config/database.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 // Import routes
@@ -39,21 +38,15 @@ app.use(errorHandler);
 // Initialize database and start server
 const startServer = async () => {
     try {
-        // Initialize database tables
-        await initDatabase();
+        // Database is initialized via Prisma (npx prisma db push)
 
         // Start server
         app.listen(config.port, () => {
             console.log(`
-╔═══════════════════════════════════════════════════════╗
-║                                                       ║
-║   🚀 AI Virtual Assistant API Server                 ║
-║                                                       ║
-║   Environment: ${config.env.padEnd(36)}║
-║   Port: ${config.port.toString().padEnd(42)}║
-║   URL: http://localhost:${config.port.toString().padEnd(30)}║
-║                                                       ║
-╚═══════════════════════════════════════════════════════╝
+   🚀 AI Virtual Assistant API Server                
+   Environment: ${config.env.padEnd(36)}
+   Port: ${config.port.toString().padEnd(42)}
+   URL: http://localhost:${config.port.toString().padEnd(30)}
       `);
         });
     } catch (error) {

@@ -1,151 +1,57 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { query } from '../config/database.js';
 import { config } from '../config/config.js';
+import * as userDao from '../dao/userDao.js';
+import { sendSuccess, sendError } from '../utils/response.js';
+import { validateRequiredFields } from '../utils/validation.js';
 
-// Register new user
-export const register = async (req, res, next) => {
+export const register = async (req, res) => {
     try {
         const { email, password, name } = req.body;
+        const validation = validateRequiredFields(req.body, ['email', 'password']);
+        if (!validation.valid) return sendError(res, 400, `Missing fields: ${validation.missing.join(', ')}`);
 
-        // Validate input
-        if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email and password are required',
-            });
-        }
+        const existingUser = await userDao.findUserByEmail(email);
+        if (existingUser) return sendError(res, 400, 'User already exists');
 
-        // Check if user already exists
-        const existingUser = await query(
-            'SELECT id FROM users WHERE email = $1',
-            [email]
-        );
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await userDao.createUser({ email, password: hashedPassword, name });
 
-        if (existingUser.rows.length > 0) {
-            return res.status(409).json({
-                success: false,
-                error: 'User already exists',
-            });
-        }
-
-        // Hash password
-        const passwordHash = await bcrypt.hash(password, 10);
-
-        // Create user
-        const result = await query(
-            'INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id, email, name, created_at',
-            [email, passwordHash, name]
-        );
-
-        const user = result.rows[0];
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { userId: user.id, email: user.email },
-            config.jwt.secret,
-            { expiresIn: config.jwt.expiresIn }
-        );
-
-        res.status(201).json({
-            success: true,
-            data: {
-                user: {
-                    id: user.id,
-                    email: user.email,
-                    name: user.name,
-                    createdAt: user.created_at,
-                },
-                token,
-            },
-        });
+        const token = jwt.sign({ userId: user.id, email: user.email }, config.jwt.secret, { expiresIn: config.jwt.expiresIn });
+        sendSuccess(res, { token, user: { id: user.id, email: user.email, name: user.name } }, 201);
     } catch (error) {
-        next(error);
+        console.error('Register error:', error);
+        sendError(res, 500, 'Registration failed');
     }
 };
 
-// Login user
-export const login = async (req, res, next) => {
+export const login = async (req, res) => {
     try {
         const { email, password } = req.body;
+        const validation = validateRequiredFields(req.body, ['email', 'password']);
+        if (!validation.valid) return sendError(res, 400, `Missing fields: ${validation.missing.join(', ')}`);
 
-        // Validate input
-        if (!email || !password) {
-            return res.status(400).json({
-                success: false,
-                error: 'Email and password are required',
-            });
-        }
+        const user = await userDao.findUserByEmail(email);
+        if (!user) return sendError(res, 401, 'Invalid credentials');
 
-        // Find user
-        const result = await query(
-            'SELECT id, email, name, password_hash, created_at FROM users WHERE email = $1',
-            [email]
-        );
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) return sendError(res, 401, 'Invalid credentials');
 
-        if (result.rows.length === 0) {
-            return res.status(401).json({
-                success: false,
-                error: 'Invalid credentials',
-            });
-        }
-
-        const user = result.rows[0];
-
-        // Verify password
-        const isValidPassword = await bcrypt.compare(password, user.password_hash);
-
-        if (!isValidPassword) {
-            return res.status(401).json({
-                success: false,
-                error: 'Invalid credentials',
-            });
-        }
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { userId: user.id, email: user.email },
-            config.jwt.secret,
-            { expiresIn: config.jwt.expiresIn }
-        );
-
-        res.json({
-            success: true,
-            data: {
-                user: {
-                    id: user.id,
-                    email: user.email,
-                    name: user.name,
-                    createdAt: user.created_at,
-                },
-                token,
-            },
-        });
+        const token = jwt.sign({ userId: user.id, email: user.email }, config.jwt.secret, { expiresIn: config.jwt.expiresIn });
+        sendSuccess(res, { token, user: { id: user.id, email: user.email, name: user.name } });
     } catch (error) {
-        next(error);
+        console.error('Login error:', error);
+        sendError(res, 500, 'Login failed');
     }
 };
 
-// Get current user
-export const getMe = async (req, res, next) => {
+export const getMe = async (req, res) => {
     try {
-        const result = await query(
-            'SELECT id, email, name, created_at FROM users WHERE id = $1',
-            [req.user.id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'User not found',
-            });
-        }
-
-        res.json({
-            success: true,
-            data: result.rows[0],
-        });
+        const user = await userDao.findUserById(req.user.id);
+        if (!user) return sendError(res, 404, 'User not found');
+        sendSuccess(res, { id: user.id, email: user.email, name: user.name });
     } catch (error) {
-        next(error);
+        console.error('GetMe error:', error);
+        sendError(res, 500, 'Failed to fetch user');
     }
 };

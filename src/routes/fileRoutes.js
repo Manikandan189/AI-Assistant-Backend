@@ -7,6 +7,14 @@ const router = express.Router();
 // All routes require authentication
 router.use(authMiddleware);
 
+router.get('/projects/:id', async (req, res, next) => {
+    try {
+        const files = await require('../dao/fileDao.js').findFilesByProjectId(req.params.id);
+        res.json({ success: true, data: files });
+    } catch (error) {
+        next(error);
+    }
+});
 router.post('/projects/:id/upload', upload.array('files', 1000), uploadFiles);
 router.post('/projects/:id/analyze', analyzeProjectFiles);
 router.post('/projects/:id/query', queryProject);

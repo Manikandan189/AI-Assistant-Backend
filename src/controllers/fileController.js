@@ -1,340 +1,175 @@
 import multer from 'multer';
+import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
-import fs from 'fs/promises';
-import AdmZip from 'adm-zip';
-import { query } from '../config/database.js';
 import { config } from '../config/config.js';
+import * as fileDao from '../dao/fileDao.js';
+import * as projectDao from '../dao/projectDao.js';
 import { aiService } from '../services/aiService.js';
+import { sendSuccess, sendError } from '../utils/response.js';
 
-// Configure multer for file uploads
+// Ensure upload directory exists
+if (!fs.existsSync(config.upload.uploadDir)) {
+    fs.mkdirSync(config.upload.uploadDir, { recursive: true });
+}
+
+// Configure Multer
 const storage = multer.diskStorage({
-    destination: async (req, file, cb) => {
-        const uploadDir = config.upload.uploadDir;
-        await fs.mkdir(uploadDir, { recursive: true });
-        cb(null, uploadDir);
+    destination: (req, file, cb) => {
+        cb(null, config.upload.uploadDir);
     },
     filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+        // Sanitize filename
+        const sanitized = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+        cb(null, `${Date.now()}-${sanitized}`);
     }
 });
 
 export const upload = multer({
-    storage: storage,
-    limits: {
-        fileSize: config.upload.maxFileSize, // 5GB
-        files: 1000, // Allow up to 1000 files at once
-    },
-    fileFilter: (req, file, cb) => {
-        // Accept all file types
-        cb(null, true);
-    },
+    storage,
+    limits: { fileSize: config.upload.maxFileSize }
 });
 
-// Upload files to project
-export const uploadFiles = async (req, res, next) => {
+export const uploadFiles = async (req, res) => {
     try {
-        const { id: projectId } = req.params;
-        const files = req.files;
+        const projectId = req.params.id;
+        const project = await projectDao.findProjectById(projectId);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
 
-        if (!files || files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'No files uploaded',
-            });
+        if (!req.files || req.files.length === 0) {
+            return sendError(res, 400, 'No files uploaded');
         }
 
-        // Verify project belongs to user
-        const projectCheck = await query(
-            'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-            [projectId, req.user.id]
-        );
-
-        if (projectCheck.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        const uploadedFiles = [];
-
-        for (const file of files) {
-            // Check if it's a zip file
-            if (file.mimetype === 'application/zip' || file.originalname.endsWith('.zip')) {
-                // Extract zip file
-                const extractedFiles = await extractZipFile(file.path, projectId);
-                uploadedFiles.push(...extractedFiles);
-            } else {
-                // Read file content
-                const content = await fs.readFile(file.path, 'utf-8').catch(() => null);
-
-                // Preserve folder structure if available (from webkitRelativePath)
-                // The path will be the original filename or relative path from folder upload
-                const filePath = file.originalname;
-
-                // Save file to database
-                const result = await query(
-                    `INSERT INTO files (project_id, name, path, type, size, content) 
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-                    [
-                        projectId,
-                        file.originalname.split('/').pop(), // Just the filename
-                        filePath, // Full path including folders
-                        file.mimetype,
-                        file.size,
-                        content,
-                    ]
-                );
-
-                uploadedFiles.push(result.rows[0]);
+        const filesData = await Promise.all(req.files.map(async (file) => {
+            // Read file content if text
+            let content = null;
+            const ext = path.extname(file.originalname).toLowerCase();
+            if (file.mimetype.startsWith('text/') ||
+                ['.js', '.ts', '.jsx', '.tsx', '.json', '.md', '.html', '.css', '.py', '.java', '.c', '.cpp', '.h', '.sql', '.prisma'].includes(ext)) {
+                try {
+                    content = await fsPromises.readFile(file.path, 'utf-8');
+                } catch (err) {
+                    console.warn(`Failed to read content of ${file.originalname}:`, err);
+                }
             }
-        }
 
-        // Update project status
-        await query(
-            `UPDATE projects SET status = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-            [projectId]
-        );
-
-        res.status(201).json({
-            success: true,
-            data: uploadedFiles,
-            message: `${uploadedFiles.length} file(s) uploaded successfully`,
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Extract zip file
-async function extractZipFile(zipPath, projectId) {
-    const zip = new AdmZip(zipPath);
-    const zipEntries = zip.getEntries();
-    const extractedFiles = [];
-
-    for (const entry of zipEntries) {
-        if (!entry.isDirectory) {
-            const content = entry.getData().toString('utf8');
-            const fileName = entry.entryName;
-            const fileSize = entry.header.size;
-
-            // Save to database
-            const result = await query(
-                `INSERT INTO files (project_id, name, path, type, size, content) 
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-                [
-                    projectId,
-                    path.basename(fileName),
-                    fileName,
-                    'text/plain',
-                    fileSize,
-                    content,
-                ]
-            );
-
-            extractedFiles.push(result.rows[0]);
-        }
-    }
-
-    return extractedFiles;
-}
-
-// Delete file
-export const deleteFile = async (req, res, next) => {
-    try {
-        const { id } = req.params;
-
-        // Verify file belongs to user's project
-        const result = await query(
-            `DELETE FROM files 
-       WHERE id = $1 
-       AND project_id IN (SELECT id FROM projects WHERE user_id = $2) 
-       RETURNING *`,
-            [id, req.user.id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'File not found',
-            });
-        }
-
-        // Delete physical file
-        const file = result.rows[0];
-        await fs.unlink(file.path).catch(() => { });
-
-        res.json({
-            success: true,
-            message: 'File deleted successfully',
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Analyze a single file
-export const analyzeFile = async (req, res, next) => {
-    try {
-        const { id } = req.params;
-
-        // Get file content
-        const result = await query(
-            `SELECT * FROM files 
-             WHERE id = $1 
-             AND project_id IN (SELECT id FROM projects WHERE user_id = $2)`,
-            [id, req.user.id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'File not found',
-            });
-        }
-
-        const file = result.rows[0];
-
-        if (!file.content) {
-            // Try to read from disk if content is missing in DB
-            try {
-                file.content = await fs.readFile(file.path, 'utf-8');
-            } catch (err) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'File content not available for analysis',
-                });
-            }
-        }
-
-        // Call Gemini API
-        const summary = await aiService.analyzeFile(file.content, file.name);
-
-        // Update database with summary
-        await query(
-            'UPDATE files SET summary = $1 WHERE id = $2',
-            [summary, id]
-        );
-
-        res.json({
-            success: true,
-            data: {
-                id: file.id,
-                summary,
-            },
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
-// Analyze all files in a project
-export const analyzeProjectFiles = async (req, res, next) => {
-    try {
-        const { id: projectId } = req.params;
-        const { model: modelName } = req.body;
-
-        // Verify project
-        const projectCheck = await query(
-            'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-            [projectId, req.user.id]
-        );
-
-        if (projectCheck.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        // Get all files
-        const filesResult = await query(
-            'SELECT * FROM files WHERE project_id = $1',
-            [projectId]
-        );
-
-        const files = filesResult.rows;
-
-        if (files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'No files in project to analyze',
-            });
-        }
-
-        const summary = await aiService.analyzeProject(files, modelName);
-
-        res.json({
-            success: true,
-            data: {
+            return {
+                name: file.originalname,
+                path: file.path,
+                type: file.mimetype,
+                size: file.size,
                 projectId,
-                summary,
-                model: modelName || 'default',
-            },
-        });
+                content
+            };
+        }));
+
+        console.log('Creating files in database:', filesData.length, 'files');
+        const createdFiles = await fileDao.createFiles(filesData);
+        console.log('Files created successfully:', createdFiles);
+
+        // Prisma @updatedAt handles this automatically, but we can trigger it by updating
+        await projectDao.updateProject(projectId, {});
+
+        sendSuccess(res, { message: `${filesData.length} files uploaded successfully`, count: createdFiles.count }, 201);
     } catch (error) {
-        next(error);
+        console.error('Upload files error:', error);
+        console.error('Error details:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name
+        });
+        sendError(res, 500, error.message || 'Failed to upload files');
     }
 };
 
-// Query project with AI (conversational)
-export const queryProject = async (req, res, next) => {
+export const deleteFile = async (req, res) => {
     try {
-        const { id: projectId } = req.params;
-        const { query: userQuery, model: modelName } = req.body;
+        const file = await fileDao.findFileById(req.params.id);
+        if (!file) return sendError(res, 404, 'File not found');
 
-        if (!userQuery) {
-            return res.status(400).json({
-                success: false,
-                error: 'Query is required',
-            });
+        const project = await projectDao.findProjectById(file.projectId);
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
+
+        // Delete from disk
+        try {
+            await fsPromises.unlink(file.path);
+        } catch (err) {
+            console.warn(`Failed to delete file from disk: ${file.path}`, err);
         }
 
-        // Verify project
-        const projectCheck = await query(
-            'SELECT id, name FROM projects WHERE id = $1 AND user_id = $2',
-            [projectId, req.user.id]
-        );
-
-        if (projectCheck.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        const project = projectCheck.rows[0];
-
-        // Get all files
-        const filesResult = await query(
-            'SELECT * FROM files WHERE project_id = $1',
-            [projectId]
-        );
-
-        const files = filesResult.rows;
-
-        if (files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'No files in project to query. Please upload files first.',
-            });
-        }
-
-        // Send query to AI with file context and selected model
-        const response = await aiService.queryWithContext(userQuery, files, project.name, modelName);
-
-        res.json({
-            success: true,
-            data: {
-                query: userQuery,
-                response,
-                fileCount: files.length,
-                model: modelName || 'default',
-            },
-        });
+        await fileDao.deleteFile(req.params.id);
+        sendSuccess(res, { message: 'File deleted successfully' });
     } catch (error) {
-        next(error);
+        console.error('Delete file error:', error);
+        sendError(res, 500, 'Failed to delete file');
     }
 };
 
+export const analyzeProjectFiles = async (req, res) => {
+    try {
+        const projectId = req.params.id;
+        const { model } = req.body;
+
+        const project = await projectDao.findProjectById(projectId);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
+
+        const files = await fileDao.findFilesByProjectId(projectId);
+        if (files.length === 0) return sendError(res, 400, 'No files to analyze');
+
+        // Filter for text files/content
+        const analyzableFiles = files.filter(f => f.content);
+
+        if (analyzableFiles.length === 0) return sendError(res, 400, 'No analyzable text files found');
+
+        const summary = await aiService.analyzeProject(analyzableFiles, model);
+        sendSuccess(res, { summary });
+    } catch (error) {
+        console.error('Analyze project error:', error);
+        sendError(res, 500, 'Failed to analyze project');
+    }
+};
+
+export const queryProject = async (req, res) => {
+    try {
+        const projectId = req.params.id;
+        const { query, model } = req.body;
+
+        if (!query) return sendError(res, 400, 'Query is required');
+
+        const project = await projectDao.findProjectById(projectId);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
+
+        const files = await fileDao.findFilesByProjectId(projectId);
+        const analyzableFiles = files.filter(f => f.content);
+
+        const response = await aiService.queryWithContext(analyzableFiles, query, model);
+        sendSuccess(res, { response });
+    } catch (error) {
+        console.error('Query project error:', error);
+        sendError(res, 500, 'Failed to query project');
+    }
+};
+
+export const analyzeFile = async (req, res) => {
+    try {
+        const fileId = req.params.id;
+        const { model } = req.body;
+
+        const file = await fileDao.findFileById(fileId);
+        if (!file) return sendError(res, 404, 'File not found');
+
+        const project = await projectDao.findProjectById(file.projectId);
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
+
+        if (!file.content) return sendError(res, 400, 'File content is not available or not text');
+
+        const analysis = await aiService.analyzeFile(file, model);
+        sendSuccess(res, { analysis });
+    } catch (error) {
+        console.error('Analyze file error:', error);
+        sendError(res, 500, 'Failed to analyze file');
+    }
+};

@@ -1,170 +1,87 @@
-import { query } from '../config/database.js';
+import * as projectDao from '../dao/projectDao.js';
+import * as fileDao from '../dao/fileDao.js';
+import { sendSuccess, sendError } from '../utils/response.js';
+import { validateRequiredFields } from '../utils/validation.js';
 
-// Get all projects for user
-export const getProjects = async (req, res, next) => {
+export const getProjects = async (req, res) => {
     try {
-        const result = await query(
-            `SELECT p.*, COUNT(f.id) as file_count 
-       FROM projects p 
-       LEFT JOIN files f ON p.id = f.project_id 
-       WHERE p.user_id = $1 
-       GROUP BY p.id 
-       ORDER BY p.updated_at DESC`,
-            [req.user.id]
-        );
-
-        res.json({
-            success: true,
-            data: result.rows,
-        });
+        const projects = await projectDao.findProjectsByUserId(req.user.id);
+        sendSuccess(res, projects);
     } catch (error) {
-        next(error);
+        console.error('Get projects error:', error);
+        sendError(res, 500, 'Failed to fetch projects');
     }
 };
 
-// Get single project
-export const getProject = async (req, res, next) => {
+export const getProject = async (req, res) => {
     try {
-        const { id } = req.params;
-
-        const result = await query(
-            `SELECT p.*, COUNT(f.id) as file_count 
-       FROM projects p 
-       LEFT JOIN files f ON p.id = f.project_id 
-       WHERE p.id = $1 AND p.user_id = $2 
-       GROUP BY p.id`,
-            [id, req.user.id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        res.json({
-            success: true,
-            data: result.rows[0],
-        });
+        const project = await projectDao.findProjectById(req.params.id);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
+        sendSuccess(res, project);
     } catch (error) {
-        next(error);
+        console.error('Get project error:', error);
+        sendError(res, 500, 'Failed to fetch project');
     }
 };
 
-// Create project
-export const createProject = async (req, res, next) => {
+export const createProject = async (req, res) => {
     try {
         const { name, description } = req.body;
+        const validation = validateRequiredFields(req.body, ['name']);
+        if (!validation.valid) return sendError(res, 400, `Missing fields: ${validation.missing.join(', ')}`);
 
-        if (!name) {
-            return res.status(400).json({
-                success: false,
-                error: 'Project name is required',
-            });
-        }
-
-        const result = await query(
-            'INSERT INTO projects (user_id, name, description) VALUES ($1, $2, $3) RETURNING *',
-            [req.user.id, name, description]
-        );
-
-        res.status(201).json({
-            success: true,
-            data: result.rows[0],
+        const project = await projectDao.createProject({
+            name,
+            description,
+            userId: req.user.id
         });
+        sendSuccess(res, project, 201);
     } catch (error) {
-        next(error);
+        console.error('Create project error:', error);
+        sendError(res, 500, 'Failed to create project');
     }
 };
 
-// Update project
-export const updateProject = async (req, res, next) => {
+export const updateProject = async (req, res) => {
     try {
-        const { id } = req.params;
-        const { name, description, status } = req.body;
+        const { name, description } = req.body;
+        const project = await projectDao.findProjectById(req.params.id);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
 
-        const result = await query(
-            `UPDATE projects 
-       SET name = COALESCE($1, name), 
-           description = COALESCE($2, description), 
-           status = COALESCE($3, status),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $4 AND user_id = $5 
-       RETURNING *`,
-            [name, description, status, id, req.user.id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        res.json({
-            success: true,
-            data: result.rows[0],
-        });
+        const updatedProject = await projectDao.updateProject(req.params.id, { name, description });
+        sendSuccess(res, updatedProject);
     } catch (error) {
-        next(error);
+        console.error('Update project error:', error);
+        sendError(res, 500, 'Failed to update project');
     }
 };
 
-// Delete project
-export const deleteProject = async (req, res, next) => {
+export const deleteProject = async (req, res) => {
     try {
-        const { id } = req.params;
+        const project = await projectDao.findProjectById(req.params.id);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
 
-        const result = await query(
-            'DELETE FROM projects WHERE id = $1 AND user_id = $2 RETURNING id',
-            [id, req.user.id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'Project deleted successfully',
-        });
+        await projectDao.deleteProject(req.params.id);
+        sendSuccess(res, { message: 'Project deleted successfully' });
     } catch (error) {
-        next(error);
+        console.error('Delete project error:', error);
+        sendError(res, 500, 'Failed to delete project');
     }
 };
 
-// Get project files
-export const getProjectFiles = async (req, res, next) => {
+export const getProjectFiles = async (req, res) => {
     try {
-        const { id } = req.params;
+        const project = await projectDao.findProjectById(req.params.id);
+        if (!project) return sendError(res, 404, 'Project not found');
+        if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
 
-        // Verify project belongs to user
-        const projectCheck = await query(
-            'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-            [id, req.user.id]
-        );
-
-        if (projectCheck.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'Project not found',
-            });
-        }
-
-        const result = await query(
-            'SELECT * FROM files WHERE project_id = $1 ORDER BY path',
-            [id]
-        );
-
-        res.json({
-            success: true,
-            data: result.rows,
-        });
+        const files = await fileDao.findFilesByProjectId(req.params.id);
+        sendSuccess(res, files);
     } catch (error) {
-        next(error);
+        console.error('Get project files error:', error);
+        sendError(res, 500, 'Failed to fetch project files');
     }
 };

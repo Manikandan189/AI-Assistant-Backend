@@ -1,21 +1,14 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { aiService } from '../services/aiService.js';
+import { sendSuccess, sendError } from '../utils/response.js';
+import { validateDirectory, validateRequiredFields } from '../utils/validation.js';
 
 // Directories to skip during analysis
 const SKIP_DIRS = [
-    'node_modules',
-    '.git',
-    '.next',
-    'dist',
-    'build',
-    '.cache',
-    'coverage',
-    '__pycache__',
-    '.venv',
-    'venv',
-    '.idea',
-    '.vscode'
+    'node_modules', '.git', '.next', 'dist', 'build',
+    '.cache', 'coverage', '__pycache__', '.venv', 'venv',
+    '.idea', '.vscode'
 ];
 
 // File extensions to skip
@@ -28,13 +21,15 @@ const SKIP_EXTENSIONS = [
     '.pdf', '.doc', '.docx', '.xls', '.xlsx'
 ];
 
-// Read directory recursively
+/**
+ * Read directory recursively and return all text files
+ * @param {string} dirPath - Directory path to read
+ * @returns {Promise<Array>} Array of file objects
+ */
 async function readDirectoryRecursive(dirPath) {
     const files = [];
 
-    async function traverse(currentPath, depth = 0) {
-        // No depth limit - analyze everything!
-
+    async function traverse(currentPath) {
         try {
             const entries = await fs.readdir(currentPath, { withFileTypes: true });
 
@@ -43,27 +38,20 @@ async function readDirectoryRecursive(dirPath) {
                 const relativePath = path.relative(dirPath, fullPath);
 
                 if (entry.isDirectory()) {
-                    // Skip certain directories
                     if (SKIP_DIRS.includes(entry.name)) continue;
-                    await traverse(fullPath, depth + 1);
+                    await traverse(fullPath);
                 } else if (entry.isFile()) {
-                    // Skip certain file types
                     const ext = path.extname(entry.name).toLowerCase();
                     if (SKIP_EXTENSIONS.includes(ext)) continue;
 
-                    // Get file stats
                     const stats = await fs.stat(fullPath);
-
-                    // No size limit - read all text files!
-                    // Only limit is for AI analysis (handled in AI service)
 
                     // Read file content
                     let content = null;
                     try {
                         content = await fs.readFile(fullPath, 'utf-8');
                     } catch (err) {
-                        // Skip binary files or files that can't be read as text
-                        continue;
+                        continue; // Skip binary files
                     }
 
                     files.push({
@@ -71,7 +59,7 @@ async function readDirectoryRecursive(dirPath) {
                         path: relativePath,
                         type: 'text/plain',
                         size: stats.size,
-                        content: content
+                        content
                     });
                 }
             }
@@ -84,32 +72,24 @@ async function readDirectoryRecursive(dirPath) {
     return files;
 }
 
-// Analyze directory without storing files
+/**
+ * Analyze directory without storing files
+ * @route POST /api/directory/analyze
+ */
 export const analyzeDirectory = async (req, res, next) => {
     try {
         const { directoryPath, model: modelName } = req.body;
 
-        if (!directoryPath) {
-            return res.status(400).json({
-                success: false,
-                error: 'Directory path is required',
-            });
+        // Validate required fields
+        const validation = validateRequiredFields(req.body, ['directoryPath']);
+        if (!validation.valid) {
+            return sendError(res, 400, 'Directory path is required');
         }
 
-        // Check if directory exists
-        try {
-            const stats = await fs.stat(directoryPath);
-            if (!stats.isDirectory()) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Path is not a directory',
-                });
-            }
-        } catch (error) {
-            return res.status(400).json({
-                success: false,
-                error: 'Directory not found or not accessible',
-            });
+        // Validate directory
+        const dirValidation = await validateDirectory(directoryPath);
+        if (!dirValidation.valid) {
+            return sendError(res, 400, dirValidation.error);
         }
 
         // Read files from directory
@@ -117,68 +97,54 @@ export const analyzeDirectory = async (req, res, next) => {
         const files = await readDirectoryRecursive(directoryPath);
 
         if (files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'No analyzable files found in directory',
-            });
+            return sendError(res, 400, 'No analyzable files found in directory');
         }
 
         console.log(`Found ${files.length} files to analyze`);
 
         // Analyze with AI
+        console.log('Calling AI service with model:', modelName);
         const summary = await aiService.analyzeProject(files, modelName);
+        console.log('AI analysis complete');
 
-        res.json({
-            success: true,
-            data: {
-                directoryPath,
-                filesAnalyzed: files.length,
-                summary,
-                model: modelName || 'default',
-            },
+        return sendSuccess(res, {
+            directoryPath,
+            filesAnalyzed: files.length,
+            summary,
+            model: modelName || 'default'
         });
     } catch (error) {
         console.error('Directory analysis error:', error);
+        console.error('Error stack:', error.stack);
         next(error);
     }
 };
 
-// Query directory files without storing
+/**
+ * Query directory files without storing
+ * @route POST /api/directory/query
+ */
 export const queryDirectory = async (req, res, next) => {
     try {
         const { directoryPath, query: userQuery, model: modelName } = req.body;
 
-        if (!directoryPath || !userQuery) {
-            return res.status(400).json({
-                success: false,
-                error: 'Directory path and query are required',
-            });
+        // Validate required fields
+        const validation = validateRequiredFields(req.body, ['directoryPath', 'query']);
+        if (!validation.valid) {
+            return sendError(res, 400, `Missing required fields: ${validation.missing.join(', ')}`);
         }
 
-        // Check if directory exists
-        try {
-            const stats = await fs.stat(directoryPath);
-            if (!stats.isDirectory()) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Path is not a directory',
-                });
-            }
-        } catch (error) {
-            return res.status(400).json({
-                success: false,
-                error: 'Directory not found or not accessible',
-            });
+        // Validate directory
+        const dirValidation = await validateDirectory(directoryPath);
+        if (!dirValidation.valid) {
+            return sendError(res, 400, dirValidation.error);
         }
 
         // Read files from directory
         const files = await readDirectoryRecursive(directoryPath);
 
         if (files.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'No analyzable files found in directory',
-            });
+            return sendError(res, 400, 'No analyzable files found in directory');
         }
 
         // Get directory name for context
@@ -187,14 +153,11 @@ export const queryDirectory = async (req, res, next) => {
         // Query with AI
         const response = await aiService.queryWithContext(userQuery, files, dirName, modelName);
 
-        res.json({
-            success: true,
-            data: {
-                query: userQuery,
-                response,
-                filesAnalyzed: files.length,
-                model: modelName || 'default',
-            },
+        return sendSuccess(res, {
+            query: userQuery,
+            response,
+            filesAnalyzed: files.length,
+            model: modelName || 'default'
         });
     } catch (error) {
         console.error('Directory query error:', error);
