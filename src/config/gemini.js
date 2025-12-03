@@ -3,11 +3,16 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const geminiConfig = {
-    apiKey: process.env.GEMINI_API_KEY || "AIzaSyDBlTQXn8kH2G61w5A2cPorGMt1Ds1loo8",
+    apiKey: process.env.GEMINI_API_KEY,
     model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
     maxTokens: 100000,
     temperature: 0.7
 };
+
+if (!geminiConfig.apiKey) {
+    console.error('❌ GEMINI_API_KEY is not set in environment variables!');
+    console.error('Please add GEMINI_API_KEY to your .env file');
+}
 
 // Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(geminiConfig.apiKey);
