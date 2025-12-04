@@ -137,7 +137,8 @@ export const queryProject = async (req, res) => {
         const { query, model } = req.body;
 
         if (!query) return sendError(res, 400, 'Query is required');
-
+        console.log('Query:', query);
+        console.log('Model:', model);
         const project = await projectDao.findProjectById(projectId);
         if (!project) return sendError(res, 404, 'Project not found');
         if (project.userId !== req.user.id) return sendError(res, 403, 'Unauthorized');
@@ -145,7 +146,7 @@ export const queryProject = async (req, res) => {
         const files = await fileDao.findFilesByProjectId(projectId);
         const analyzableFiles = files.filter(f => f.content);
 
-        const response = await aiService.queryWithContext(analyzableFiles, query, model);
+        const response = await aiService.queryWithContext(query, analyzableFiles, project.name, model);
         sendSuccess(res, { response });
     } catch (error) {
         console.error('Query project error:', error);

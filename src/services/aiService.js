@@ -47,7 +47,7 @@ export const aiService = {
             for (const file of files) {
                 // Skip non-text files or very large files for now
                 if (file.type && file.type.startsWith('image')) continue;
-                if (file.size > 1000000) continue;
+                // if (file.size > 1000000) continue;
 
                 prompt += `--- File: ${file.name} ---\n`;
                 prompt += `${file.content ? file.content.substring(0, 20000) : 'Content not available'}\n\n`;

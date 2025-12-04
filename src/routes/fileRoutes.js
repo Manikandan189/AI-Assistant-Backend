@@ -2,6 +2,8 @@ import express from 'express';
 import { upload, uploadFiles, deleteFile, analyzeFile, analyzeProjectFiles, queryProject } from '../controllers/fileController.js';
 import { authMiddleware } from '../middleware/auth.js';
 
+import { findFilesByProjectId } from '../dao/fileDao.js';
+
 const router = express.Router();
 
 // All routes require authentication
@@ -9,7 +11,7 @@ router.use(authMiddleware);
 
 router.get('/projects/:id', async (req, res, next) => {
     try {
-        const files = await require('../dao/fileDao.js').findFilesByProjectId(req.params.id);
+        const files = await findFilesByProjectId(req.params.id);
         res.json({ success: true, data: files });
     } catch (error) {
         next(error);
